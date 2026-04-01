@@ -1,2 +1,6 @@
 .devenv
 .direnv
+node_modules
+build
+dist
+out

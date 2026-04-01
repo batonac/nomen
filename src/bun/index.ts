@@ -24,14 +24,26 @@ async function getMainViewUrl(): Promise<string> {
 const url = await getMainViewUrl();
 
 const mainWindow = new BrowserWindow({
-	title: "React + Vite",
+	title: "Nomen",
 	url,
 	frame: {
-		width: 900,
-		height: 700,
+		width: 1280,
+		height: 860,
 		x: 200,
 		y: 200,
 	},
 });
 
-console.log("React Vite app started!");
+console.log("Nomen main window created");
+
+queueMicrotask(async () => {
+	try {
+		const { initializeDatabase } = await import("./db");
+		const { path: databasePath } = initializeDatabase();
+		console.log(`Nomen started with index at ${databasePath}`);
+	} catch (error) {
+		console.error("Failed to initialize database", error);
+	}
+});
+
+void mainWindow;
