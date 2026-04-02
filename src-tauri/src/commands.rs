@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
@@ -7,8 +8,8 @@ use crate::db::{Database, FileRow, MetadataRow, ViewRow};
 use crate::exiftool::daemon::ResilientExifToolDaemon;
 
 pub struct AppState {
-    pub db: Mutex<Database>,
-    pub exiftool: ResilientExifToolDaemon,
+    pub db: Arc<Mutex<Database>>,
+    pub exiftool: Arc<ResilientExifToolDaemon>,
 }
 
 // ─── navigate_to ─────────────────────────────────────────────────────────────
@@ -31,22 +32,20 @@ pub async fn navigate_to(
         fast_index_folder(&db, &path).await?;
     }
 
-    // Spawn full ExifTool scan in the background.
+    // Spawn full ExifTool scan in the background using Arc clones — no raw pointers.
+    let db_clone = Arc::clone(&state.db);
+    let exiftool_clone = Arc::clone(&state.exiftool);
     let app_clone = app.clone();
     let path_clone = path.clone();
-    let state_ptr = state.inner() as *const AppState as usize;
     tokio::spawn(async move {
-        // SAFETY: AppState is managed by Tauri and lives for the app lifetime.
-        let state_ref = unsafe { &*(state_ptr as *const AppState) };
-        let db = state_ref.db.lock().await;
+        let db = db_clone.lock().await;
         let _ = crate::db::indexer::index_folder(
             &db,
-            &state_ref.exiftool,
+            &exiftool_clone,
             &app_clone,
             &path_clone,
         )
         .await;
-        // After indexing, emit an update event so the frontend can refresh.
         let _ = app_clone.emit("index-update", serde_json::json!({ "folderPath": path_clone }));
     });
 

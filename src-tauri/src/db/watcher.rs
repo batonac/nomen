@@ -13,6 +13,7 @@ use crate::exiftool::daemon::ResilientExifToolDaemon;
 ///
 /// This function blocks until the returned `WatchHandle` is dropped (which
 /// stops the watcher).  Call it from a `tokio::spawn` task.
+#[allow(dead_code)]
 pub struct WatchHandle {
     _watcher: RecommendedWatcher,
 }

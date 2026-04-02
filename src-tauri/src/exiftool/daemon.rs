@@ -122,7 +122,6 @@ impl ExifToolDaemon {
 /// sequence ID, resolve the waiting oneshot when `{ready####}` is seen.
 async fn read_loop(stdout: ChildStdout, state: Arc<Mutex<DaemonState>>) {
     let reader = BufReader::new(stdout);
-    let mut current_id: Option<u32> = None;
     let mut buf = String::new();
 
     for line in reader.lines() {
@@ -133,13 +132,10 @@ async fn read_loop(stdout: ChildStdout, state: Arc<Mutex<DaemonState>>) {
                     let id_str = id_str.trim_end_matches('}');
                     if let Ok(id) = id_str.parse::<u32>() {
                         let output = std::mem::take(&mut buf);
-                        current_id = Some(id);
-
                         let mut guard = state.lock().await;
                         if let Some(pending) = guard.pending.remove(&id) {
                             let _ = pending.tx.send(Ok(output));
                         }
-                        current_id = None;
                     }
                 } else {
                     buf.push_str(&line);
@@ -158,7 +154,6 @@ async fn read_loop(stdout: ChildStdout, state: Arc<Mutex<DaemonState>>) {
     }
 
     // If we exit the loop without draining, fail remaining pending.
-    let _ = current_id; // suppress unused warning
     let mut guard = state.lock().await;
     for (_, p) in guard.pending.drain() {
         let _ = p.tx.send(Err("ExifTool process exited".to_string()));

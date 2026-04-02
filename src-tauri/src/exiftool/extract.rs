@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::daemon::ResilientExifToolDaemon;

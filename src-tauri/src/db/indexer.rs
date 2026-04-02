@@ -83,7 +83,7 @@ pub async fn index_folder(
             .unwrap_or_default()
             .as_millis() as i64;
         let inode = inode_from_meta(&meta);
-        let file_kind = classify_file_kind(&entry.path(), is_dir);
+        let file_kind = classify_file_kind_pub(&entry.path(), is_dir);
 
         // Check whether this file is already in the index and unchanged.
         let existing = db
@@ -158,10 +158,6 @@ fn split_namespace_key(key: &str) -> (&str, &str) {
     } else {
         ("system", key)
     }
-}
-
-fn classify_file_kind(path: &Path, is_dir: bool) -> &'static str {
-    classify_file_kind_pub(path, is_dir)
 }
 
 /// Public wrapper for use by the watcher module.
