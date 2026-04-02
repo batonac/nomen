@@ -31,9 +31,10 @@
 
           nativeBuildInputs = with pkgs; [
             bun
-            vite
             typescript
-            bun2nix.hook  # Sets up node_modules from pre-fetched cache
+            patchelf  # For patching electrobun binary
+          ] ++ [
+            pkgs.bun2nix.hook  # Sets up node_modules from pre-fetched cache
           ];
 
           buildInputs = with pkgs; [
@@ -71,7 +72,7 @@
 
           buildPhase = ''
             # bun2nix.hook has already set up node_modules from pre-fetched cache
-            bun run build
+            bun run build.ts
           '';
 
           installPhase = ''
@@ -86,16 +87,16 @@
           packages = with pkgs; [
             bun
             typescript
-            vite
             turso
             exiftool
             spec-kit
             webkitgtk_4_1
+            patchelf  # For patching electrobun binary
           ];
 
-          nativeBuildInputs = with pkgs; [
-            bun2nix.hook  # Sets up node_modules from pre-fetched cache
-            pkgs.bun2nix  # For regenerating bun.nix when needed
+          nativeBuildInputs = [
+            pkgs.bun2nix.hook  # Sets up node_modules from pre-fetched cache
+            pkgs.bun2nix       # For regenerating bun.nix when needed
           ];
 
           bunDeps = pkgs.bun2nix.fetchBunDeps {
@@ -128,10 +129,22 @@
 
           shellHook = ''
             echo "Nomen development environment loaded"
-            echo "  bun run build    - Build web assets with Vite"
+            echo "  bun run build    - Build web assets with Bun and package with Electrobun"
             echo "  bun run start    - Build and start Electrobun"
             echo "  bun run dev      - Watch mode for development"
             echo "  bun run test     - Run tests"
+
+            # Patch electrobun binary to use Nix's dynamic linker
+            # (electrobun downloads its CLI and needs to work in NixOS)
+            NIX_INTERP=$(${pkgs.patchelf}/bin/patchelf --print-interpreter "$(which bun)" 2>/dev/null)
+            if [ -n "$NIX_INTERP" ]; then
+              for bin in \
+                "$PWD/node_modules/electrobun/bin/electrobun"; do
+                if [ -f "$bin" ] && ! ${pkgs.patchelf}/bin/patchelf --print-interpreter "$bin" 2>/dev/null | grep -q nix; then
+                  ${pkgs.patchelf}/bin/patchelf --set-interpreter "$NIX_INTERP" "$bin" 2>/dev/null || true
+                fi
+              done
+            fi
           '';
         };
       }
