@@ -8,17 +8,19 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 
 ## Phase 0 — Project Scaffold
 
-### T-001 · Initialise Electrobun project
+### T-001 · Initialise Tauri v2 project
 **Effort**: 2h | **Depends on**: — | **Satisfies**: Infrastructure
 
-- [ ] Run `bunx electrobun init nomen`
-- [ ] Configure `electrobun.config.ts` with app name, identifier `dev.nomen.app`, version `0.1.0`
-- [ ] Set up `src/bun/main.ts` (main process entry) and `src/views/mainview/` (webview entry)
-- [ ] Verify `bun dev` launches a window and hot-reloads on change
-- [ ] Set up `bun test` with a passing smoke test
+- [ ] Initialise `src-tauri/` with `cargo tauri init` (or manual Cargo.toml + tauri.conf.json)
+- [ ] Configure `tauri.conf.json` with app name "Nomen", identifier `dev.nomen.app`, version `0.1.0`
+- [ ] Set up `src-tauri/src/main.rs` (Rust backend entry)
+- [ ] Set up `src/mainview/` (React webview entry, built with Bun)
+- [ ] Verify `cargo tauri dev` launches a window and hot-reloads on change
+- [ ] Set up `cargo test` with a passing smoke test and `bun test` for frontend types
 - [ ] Add `.gitignore`, `README.md`, `LICENSE`
+- [ ] Configure `flake.nix` with Rust toolchain, Tauri deps, and dev shell
 
-**Done when**: `bun dev` opens a window; `bun test` passes; `bunx electrobun build` produces an artifact.
+**Done when**: `cargo tauri dev` opens a window; `cargo test` passes; `cargo tauri build` produces an artifact.
 
 ---
 
@@ -34,12 +36,12 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 
 ---
 
-### T-003 · Initialise Turso database
+### T-003 · Initialise libSQL database
 **Effort**: 3h | **Depends on**: T-001 | **Satisfies**: M2
 
-- [ ] Add `@libsql/client` dependency
-- [ ] Create `src/bun/db/schema.ts` with all CREATE TABLE statements from data-model.md
-- [ ] Create `src/bun/db/index.ts` exporting a singleton DB connection to `~/.nomen/index.db`
+- [ ] Add `turso` crate dependency
+- [ ] Create `src-tauri/src/db/schema.rs` with all CREATE TABLE statements from data-model.md
+- [ ] Create `src-tauri/src/db/mod.rs` exporting a singleton DB connection to `~/.nomen/index.db`
 - [ ] Apply schema migrations on startup; handle version upgrades
 - [ ] Write integration test: insert a file row, query it back, delete it
 
@@ -52,9 +54,9 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 ### T-004 · Implement ExifTool daemon process management
 **Effort**: 4h | **Depends on**: T-001 | **Satisfies**: US-07
 
-- [ ] Create `src/bun/exiftool/daemon.ts` — `ExifToolDaemon` class
-- [ ] Spawn ExifTool with `-stay_open True -@ -` flags via `Bun.spawn`
-- [ ] Implement command queue: each call returns a `Promise<string>` resolved when `{ready####}` token received
+- [ ] Create `src-tauri/src/exiftool/daemon.rs` — `ExifToolDaemon` struct
+- [ ] Spawn ExifTool with `-stay_open True -@ -` flags via `std::process::Command`
+- [ ] Implement command queue: each call returns via a `tokio::sync::oneshot` resolved when `{ready####}` token received
 - [ ] Implement sequence ID tracking (`-execute####` / `{ready####}` correlation)
 - [ ] Implement auto-restart on process exit with exponential backoff
 - [ ] Write test: send 100 sequential file queries, verify all resolve correctly
@@ -67,9 +69,9 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 ### T-005 · Implement ExifTool JSON extraction
 **Effort**: 3h | **Depends on**: T-004 | **Satisfies**: US-07
 
-- [ ] Create `src/bun/exiftool/extract.ts` — `extractMetadata(path: string): Promise<ExifData>`
+- [ ] Create `src-tauri/src/exiftool/extract.rs` — `extract_metadata(path: &str) -> Result<ExifData>`
 - [ ] Issue `-json -all:all -struct` command sequence for a given path
-- [ ] Parse JSON response into typed `ExifData` object
+- [ ] Parse JSON response into typed `ExifData` struct via serde
 - [ ] Handle binary/non-printable values gracefully (base64 or omit)
 - [ ] Write test with known fixture files: verify EXIF, IPTC, XMP, ID3 fields extracted correctly
 
@@ -80,7 +82,7 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 ### T-006 · Implement ExifTool write-back
 **Effort**: 4h | **Depends on**: T-004 | **Satisfies**: US-04, US-05
 
-- [ ] Create `src/bun/exiftool/write.ts` — `writeMetadata(path: string, writes: MetadataWrite[]): Promise<WriteResult>`
+- [ ] Create `src-tauri/src/exiftool/write.rs` — `write_metadata(path: &str, writes: &[MetadataWrite]) -> Result<WriteResult>`
 - [ ] Build ExifTool command sequence with `-overwrite_original_in_place` and `-preserve`
 - [ ] Handle namespace-qualified tag names (e.g. `EXIF:DateTimeOriginal`)
 - [ ] Parse success/error from ExifTool stdout
@@ -95,7 +97,7 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 ### T-007 · Implement file indexer
 **Effort**: 4h | **Depends on**: T-003, T-005 | **Satisfies**: US-07
 
-- [ ] Create `src/bun/db/indexer.ts` — `indexFolder(path: string): AsyncGenerator<IndexProgress>`
+- [ ] Create `src-tauri/src/db/indexer.rs` — `index_folder(path: &str)` with progress events emitted via Tauri app handle
 - [ ] Walk directory (non-recursive, direct children only)
 - [ ] For each file: compare mtime/inode to `files` table; skip if unchanged
 - [ ] Queue ExifTool extraction for new/changed files
@@ -110,7 +112,7 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 ### T-008 · Implement filesystem watcher
 **Effort**: 3h | **Depends on**: T-007 | **Satisfies**: US-07
 
-- [ ] Use `fs.watch` (Bun native) on the current folder
+- [ ] Use `notify` crate to watch the current folder
 - [ ] On file create/modify: queue re-index for that file
 - [ ] On file delete: remove from `files` and cascade-delete `metadata`
 - [ ] On file rename: update `path` and `filename` in `files`
@@ -123,7 +125,7 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 ### T-009 · Implement write-back queue worker
 **Effort**: 3h | **Depends on**: T-003, T-006 | **Satisfies**: US-04, US-05
 
-- [ ] Create `src/bun/db/write-worker.ts` — polls `write_queue` for `pending` rows
+- [ ] Create `src-tauri/src/db/write_worker.rs` — polls `write_queue` for `pending` rows
 - [ ] Batch writes by file: collect all pending writes for a file, issue single ExifTool call
 - [ ] On success: mark rows `complete`, update `metadata` table
 - [ ] On failure: mark rows `failed`, store `error_msg`
@@ -136,29 +138,29 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 
 ## Phase 3 — RPC Layer (M3)
 
-### T-010 · Implement main-process RPC handlers
+### T-010 · Implement Tauri command handlers
 **Effort**: 4h | **Depends on**: T-007, T-009, T-002 | **Satisfies**: All user stories
 
-- [ ] Register all Webview→Main RPC handlers in `src/bun/main.ts`
-- [ ] `navigateTo`: query `files` from index for given path; trigger background scan; return `FileRow[]`
-- [ ] `getMetadata`: return full `metadata` rows for a file ID
-- [ ] `writeMetadata`: optimistic index update + enqueue to `write_queue`; return `WriteResult`
-- [ ] `bulkWrite`: same as `writeMetadata` for N files atomically
-- [ ] `fileOp`: delegate to M7 file operations module
-- [ ] `getViews` / `saveView` / `addColumn`: CRUD against `views` / `columns` tables
-- [ ] Write integration test for each handler
+- [ ] Register all Tauri commands in `src-tauri/src/commands/mod.rs`
+- [ ] `navigate_to`: query `files` from index for given path; trigger background scan; return `Vec<FileRow>`
+- [ ] `get_metadata`: return full `metadata` rows for a file ID
+- [ ] `write_metadata`: optimistic index update + enqueue to `write_queue`; return `WriteResult`
+- [ ] `bulk_write`: same as `write_metadata` for N files atomically
+- [ ] `file_op`: delegate to M7 file operations module
+- [ ] `get_views` / `save_view` / `add_column`: CRUD against `views` / `columns` tables
+- [ ] Write integration test for each command
 
-**Done when**: All RPC handlers return correctly typed responses.
+**Done when**: All Tauri commands return correctly typed responses.
 
 ---
 
-### T-011 · Implement Main→Webview push notifications
+### T-011 · Implement Rust→Webview push events
 **Effort**: 2h | **Depends on**: T-010 | **Satisfies**: US-07, US-04
 
-- [ ] Push `indexUpdate` when background scanner completes a batch
-- [ ] Push `writeResult` when write-back worker completes or fails
-- [ ] Push `indexProgress` during active scans
-- [ ] Write test: verify webview receives push events after index updates
+- [ ] Emit `index-update` event when background scanner completes a batch
+- [ ] Emit `write-result` event when write-back worker completes or fails
+- [ ] Emit `index-progress` event during active scans
+- [ ] Write test: verify webview receives all three event types after index updates
 
 **Done when**: Webview receives all three push event types correctly.
 
@@ -171,7 +173,7 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 
 - [ ] Add `@glideapps/glide-data-grid` dependency
 - [ ] Create `src/views/mainview/Grid.tsx` — Glide DataEditor component
-- [ ] Wire `navigateTo` RPC on mount; populate grid from response
+- [ ] Wire `navigate_to` Tauri command on mount; populate grid from response
 - [ ] Implement virtual row provider — request rows by index range from local state
 - [ ] Implement column 0 (icon column): frozen, non-editable, renders file kind icon
 - [ ] Verify 10,000-row render at 60fps (use synthetic data fixture)
@@ -183,8 +185,8 @@ Tasks are ordered by dependency. Each task includes the user stories it satisfie
 ### T-013 · Implement column 0 navigation behaviour
 **Effort**: 3h | **Depends on**: T-012 | **Satisfies**: US-01, US-03
 
-- [ ] Double-click on folder row → dispatch `navigateTo` RPC
-- [ ] Double-click on file row → dispatch `fileOp.open` RPC (OS default app)
+- [ ] Double-click on folder row → invoke `navigate_to` Tauri command
+- [ ] Double-click on file row → invoke `file_op` Tauri command (OS default app)
 - [ ] Single-click on any row → row selection state
 - [ ] Keyboard: Enter on selected folder row → navigate in; Backspace → navigate up
 - [ ] Write test: simulate click/keyboard events; verify correct RPC calls

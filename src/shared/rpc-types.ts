@@ -12,31 +12,31 @@ import type {
 	WriteResult,
 } from "./types";
 
-export interface WebviewToMainRpc {
-	navigateTo(path: string): Promise<FileRow[]>;
-	getMetadata(fileId: number): Promise<ExifData | MetadataRow[]>;
-	writeMetadata(writes: MetadataWrite[]): Promise<WriteResult>;
-	bulkWrite(write: BulkWrite): Promise<WriteResult>;
-	fileOp(operation: FileOperation): Promise<FileOpResult>;
-	getViews(): Promise<NamedView[]>;
-	saveView(view: NamedView): Promise<void>;
-	addColumn(column: ColumnDefinition): Promise<void>;
+/**
+ * Tauri command signatures — invoked from the frontend via `invoke()`.
+ * The Rust backend implements these as `#[tauri::command]` functions.
+ */
+export interface TauriCommands {
+	navigate_to(path: string): Promise<FileRow[]>;
+	get_metadata(fileId: number): Promise<ExifData | MetadataRow[]>;
+	write_metadata(writes: MetadataWrite[]): Promise<WriteResult>;
+	bulk_write(write: BulkWrite): Promise<WriteResult>;
+	file_op(operation: FileOperation): Promise<FileOpResult>;
+	get_views(): Promise<NamedView[]>;
+	save_view(view: NamedView): Promise<void>;
+	add_column(column: ColumnDefinition): Promise<void>;
 }
 
-export interface MainToWebviewRpc {
-	indexUpdate(rows: FileRow[]): void | Promise<void>;
-	writeResult(result: WriteResult): void | Promise<void>;
-	indexProgress(progress: IndexProgress): void | Promise<void>;
+/**
+ * Tauri event names — emitted from Rust via `app.emit()`.
+ * The frontend listens via `listen()` from `@tauri-apps/api/event`.
+ */
+export interface TauriEvents {
+	"index-update": FileRow[];
+	"write-result": WriteResult;
+	"index-progress": IndexProgress;
 }
 
-export type WebviewToMainMethod = keyof WebviewToMainRpc;
+export type TauriCommandName = keyof TauriCommands;
 
-export type MainToWebviewMethod = keyof MainToWebviewRpc;
-
-export type RpcRequestPayload<TMethod extends WebviewToMainMethod> = Parameters<
-	WebviewToMainRpc[TMethod]
->[0];
-
-export type RpcResponsePayload<TMethod extends WebviewToMainMethod> = Awaited<
-	ReturnType<WebviewToMainRpc[TMethod]>
->;
+export type TauriEventName = keyof TauriEvents;

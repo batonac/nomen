@@ -12,15 +12,17 @@
 
 | Concern | Decision |
 | --- | --- |
-| Runtime | Electrobun (Bun + native OS WebView) |
-| Language | TypeScript (main process + webview) |
+| Runtime | Tauri v2 (Rust backend + system WebView) |
+| Backend language | Rust |
+| Frontend language | TypeScript (React) |
 | Grid | Glide Data Grid |
-| Index DB | Turso (embedded, local SQLite file) |
+| Index DB | Turso (embedded, local SQLite-compatible file) |
 | Metadata engine | ExifTool (Perl, persistent daemon via -stay_open) |
-| xattr | Bun FFI → system getxattr/setxattr calls |
-| Build/package | bunx electrobun build |
-| Testing | Bun test runner (bun test) |
-| Platform target | macOS (primary), Linux (v1.0) |
+| xattr | Rust `xattr` crate |
+| Build/package | `cargo tauri build` (via Nix) |
+| Frontend bundler | Bun (`bun build`) |
+| Testing | `cargo test` (backend), `bun test` (frontend types) |
+| Platform target | Linux (primary, NixOS), macOS (v1.0) |
 
 * * *
 
@@ -28,11 +30,11 @@
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  Electrobun App                     │
+│                    Tauri v2 App                     │
 │                                                     │
-│  ┌─────────────────┐    typed RPC    ┌────────────┐ │
-│  │   Main Process  │◄───────────────►│  Webview   │ │
-│  │   (Bun)         │                 │ (Glide UI) │ │
+│  ┌─────────────────┐  tauri::invoke  ┌────────────┐ │
+│  │  Rust Backend   │◄───────────────►│  WebView   │ │
+│  │  (Tauri core)   │                 │ (Glide UI) │ │
 │  │                 │                 └────────────┘ │
 │  │  ┌───────────┐  │                                │
 │  │  │  ExifTool │  │                                │
@@ -41,14 +43,14 @@
 │  │  └───────────┘  │                                │
 │  │                 │                                │
 │  │  ┌───────────┐  │                                │
-│  │  │  Turso/   │  │                                │
-│  │  │  libSQL   │  │                                │
+│  │  │  Turso   │  │                                │
 │  │  │  (local)  │  │                                │
+│  │  │          │  │                                │
 │  │  └───────────┘  │                                │
 │  │                 │                                │
 │  │  ┌───────────┐  │                                │
 │  │  │  xattr    │  │                                │
-│  │  │  FFI      │  │                                │
+│  │  │  crate    │  │                                │
 │  │  └───────────┘  │                                │
 │  └─────────────────┘                                │
 └─────────────────────────────────────────────────────┘
@@ -58,17 +60,17 @@
 
 ## Module Breakdown
 
-### M1 — ExifTool Daemon (`src/bun/exiftool/`)
+### M1 — ExifTool Daemon (`src-tauri/src/exiftool/`)
 
 ExifTool is invoked once at startup with `-stay_open True -@ -` flags. It reads commands from stdin and writes JSON responses to stdout. This avoids the per-file process spawn overhead (typically 200–500ms per invocation) that would make the tool unusable at scale.
 
 **Key design**:
 
--   A `ExifToolDaemon` class wraps the Bun `Subprocess`
+-   An `ExifToolDaemon` struct wraps a `std::process::Child`
 -   Commands are queued and dispatched sequentially over stdin
 -   Responses are correlated to commands via sequence IDs in the JSON output (`-echo4` flag pattern)
 -   The daemon is restarted automatically if the process exits unexpectedly
--   All reads return `Promise<ExifData>` — callers never await process spawning
+-   All reads return `Result<ExifData>` via async channels — callers never block on process spawning
 
 **ExifTool invocation pattern**:
 
@@ -84,9 +86,9 @@ stdout: [{...json metadata...}]{ready0001}
 
 * * *
 
-### M2 — Turso Index (`src/bun/db/`)
+### M2 — Index Database (`src-tauri/src/db/`)
 
-A local libSQL database (`~/.nomen/index.db`) serves as the metadata cache. It is the sole data source for the grid UI — the UI never calls ExifTool directly.
+A local Turso database (`~/.nomen/index.db`) serves as the metadata cache. It is the sole data source for the grid UI — the UI never calls ExifTool directly.
 
 **Schema** (see data-model.md for full definition):
 
@@ -100,35 +102,35 @@ A local libSQL database (`~/.nomen/index.db`) serves as the metadata cache. It i
 
 -   On folder navigation: query `files` for known entries; trigger background scan for new/changed files
 -   Background scanner walks directory, compares mtime/inode to index, enqueues ExifTool reads for changed files
--   `fs.watch` (Bun native) monitors open folders for real-time changes
+-   `notify` crate monitors open folders for real-time changes
 -   Write-back queue is processed by a background worker; failures are logged to `write_errors` table
 
 * * *
 
-### M3 — RPC Layer (`src/bun/rpc/` + `src/views/rpc/`)
+### M3 — Tauri Command Layer (`src-tauri/src/commands/` + `src/mainview/`)
 
-All communication between main process and webview uses Electrobun's typed RPC. Contracts are defined in `src/shared/rpc-types.ts` and imported by both sides.
+All communication between Rust backend and webview uses Tauri's `#[tauri::command]` system. The frontend invokes commands via `@tauri-apps/api` `invoke()`. Events are pushed from Rust to the webview via Tauri's event system.
 
-**Main → Webview RPC (push)**:
+**Webview → Rust commands**:
 
--   `indexUpdate(rows: FileRow[])` — push updated rows to grid
--   `writeResult(result: WriteResult)` — notify of async write completion/failure
--   `indexProgress(progress: IndexProgress)` — background scan progress
+-   `navigate_to(path: String) -> Vec<FileRow>` — change directory, returns initial rows
+-   `get_metadata(file_id: i64) -> ExifData` — full metadata for a file
+-   `write_metadata(writes: Vec<MetadataWrite>) -> WriteResult` — commit cell edits
+-   `bulk_write(write: BulkWrite) -> WriteResult` — bulk edit operation
+-   `file_op(op: FileOperation) -> FileOpResult` — rename, move, copy, delete
+-   `get_views() -> Vec<NamedView>` — list saved views
+-   `save_view(view: NamedView)` — persist a named view
+-   `add_column(col: ColumnDefinition)` — add user-defined column
 
-**Webview → Main RPC (request)**:
+**Rust → Webview events (via `app.emit()`)**:
 
--   `navigateTo(path: string): Promise<FileRow[]>` — change directory, returns initial rows
--   `getMetadata(fileId: number): Promise<ExifData>` — full metadata for a file
--   `writeMetadata(writes: MetadataWrite[]): Promise<WriteResult>` — commit cell edits
--   `bulkWrite(writes: BulkWrite): Promise<WriteResult>` — bulk edit operation
--   `fileOp(op: FileOperation): Promise<FileOpResult>` — rename, move, copy, delete
--   `getViews(): Promise<NamedView[]>` — list saved views
--   `saveView(view: NamedView): Promise<void>` — persist a named view
--   `addColumn(col: ColumnDefinition): Promise<void>` — add user-defined column
+-   `index-update` — push updated rows to grid
+-   `write-result` — notify of async write completion/failure
+-   `index-progress` — background scan progress
 
 * * *
 
-### M4 — Grid UI (`src/views/mainview/`)
+### M4 — Grid UI (`src/mainview/`)
 
 The webview renders the Glide Data Grid. The grid operates in a virtual mode — it requests rows by index range and Glide handles windowing.
 
@@ -157,29 +159,29 @@ The webview renders the Glide Data Grid. The grid operates in a virtual mode —
 
 * * *
 
-### M5 — Breadcrumb Navigation (`src/views/mainview/Breadcrumb.tsx`)
+### M5 — Breadcrumb Navigation (`src/mainview/Breadcrumb.tsx`)
 
 A custom breadcrumb component replaces the traditional sidebar tree.
 
 -   Path segments rendered as clickable buttons
--   Click on segment → `navigateTo(segmentPath)`
--   Click on separator between segments → popover with sibling folders (fetched via `listDirectory(parentPath)`)
--   F6 → breadcrumb becomes a plain text input; Enter dispatches `navigateTo`
+-   Click on segment → invoke `navigate_to(segmentPath)`
+-   Click on separator between segments → popover with sibling folders (fetched via `list_directory(parentPath)` command)
+-   F6 → breadcrumb becomes a plain text input; Enter invokes `navigate_to`
 -   Keyboard: Left/Right arrows move between segments; Enter activates
 
 * * *
 
-### M6 — xattr Module (`src/bun/xattr/`)
+### M6 — xattr Module (`src-tauri/src/xattr.rs`)
 
-A thin Bun FFI wrapper around POSIX `getxattr`/`setxattr`/`listxattr`/`removexattr`. On macOS this uses the `<sys/xattr.h>` API; on Linux the `<sys/xattr.h>` POSIX API.
+Uses the Rust `xattr` crate for cross-platform extended attribute access. On macOS this uses the `<sys/xattr.h>` API; on Linux the `<sys/xattr.h>` POSIX API. The crate abstracts both.
 
 User-defined column values stored in xattr use the namespace prefix `user.nomen.` to avoid collisions.
 
 * * *
 
-### M7 — File Operations (`src/bun/fileops/`)
+### M7 — File Operations (`src-tauri/src/fileops.rs`)
 
-Standard POSIX file operations wrapped for async Bun usage. All destructive operations (delete, move/overwrite) require confirmation via RPC before execution. Move operations preserve xattr where the target filesystem supports it (detected at runtime).
+Standard POSIX file operations wrapped in Tauri commands. All destructive operations (delete, move/overwrite) require confirmation via the frontend before execution. Move operations preserve xattr where the target filesystem supports it (detected at runtime).
 
 * * *
 
@@ -188,7 +190,7 @@ Standard POSIX file operations wrapped for async Bun usage. All destructive oper
 -    **Speed**: Grid data served from Turso index, never from ExifTool directly. ExifTool daemon avoids per-file spawn. ✓
 -    **Write safety**: ExifTool `-preserve` flag used; `write_queue` with failure logging; bulk edit confirmation affordance. ✓
 -    **Standards fidelity**: All metadata written via ExifTool to standard embedded fields or XMP sidecar. ✓
--    **No lock-in**: Index is plain SQLite. Metadata lives in files. ✓
+-    **No lock-in**: Index is SQLite-compatible (Turso). Metadata lives in files. ✓
 -    **Offline first**: No network dependency for any v1.0 feature. ✓
 -    **Progressive enhancement**: Ollama and Turso Cloud not referenced in v1.0 plan. ✓
 

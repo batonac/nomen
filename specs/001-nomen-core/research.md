@@ -4,19 +4,21 @@
 
 * * *
 
-## R1 — Runtime: Electrobun vs Tauri vs Electron
+## R1 — Runtime: Tauri vs Electrobun vs Electron
 
-| Concern | Electrobun | Tauri | Electron |
+| Concern | Tauri | Electrobun | Electron |
 | --- | --- | --- | --- |
-| Bundle size | ~12MB | ~10MB | ~150MB+ |
-| Language | TypeScript throughout | Rust backend + JS frontend | JavaScript throughout |
-| ExifTool subprocess | Bun native (Bun.spawn) | Rust std::process | Node child_process |
-| Startup time | <50ms | ~100ms | ~500ms+ |
-| Maturity | Young (v1, March 2026) | Mature (v2 stable) | Very mature |
-| Cross-platform Linux | WebKitGTK, bundled browser option | WebKitGTK | Chromium bundled |
+| Bundle size | ~10MB | ~12MB | ~150MB+ |
+| Language | Rust backend + JS frontend | TypeScript throughout | JavaScript throughout |
+| ExifTool subprocess | Rust std::process::Command | Bun native (Bun.spawn) | Node child_process |
+| Startup time | ~100ms | <50ms | ~500ms+ |
+| Maturity | Mature (v2 stable) | Young (v1, March 2026) | Very mature |
+| Cross-platform Linux | WebKitGTK (native) | WebKitGTK, bundled browser option | Chromium bundled |
+| NixOS support | First-class (in nixpkgs) | Broken (segfault in bundled Bun FFI) | Works |
 | Grid library ecosystem | Full JS/TS ecosystem | Full JS/TS ecosystem | Full JS/TS ecosystem |
+| SQLite / Turso | Native via `turso` crate (pure Rust) | @tursodatabase/database | better-sqlite3 |
 
-**Decision**: Electrobun. TypeScript throughout is the key advantage — no context switch between Rust and TypeScript. ExifTool subprocess management, Turso client, and xattr FFI are all natural in Bun. The young maturity is an accepted risk; macOS-first mitigates the Linux WebView concerns for v1.0.
+**Decision**: Tauri v2. Electrobun was initially chosen for TypeScript-throughout simplicity, but its Linux support is not production-ready — the bundled Bun binary segfaults during FFI calls to `libNativeWrapper.so` on NixOS and there is no workaround. Tauri's Rust backend is a natural fit for ExifTool subprocess management, xattr syscalls (via the `xattr` crate), and direct SQLite/libSQL access. Tauri v2 is mature, ships in nixpkgs, and uses the system WebKitGTK — no binary patching required. The cost is maintaining Rust alongside TypeScript, but the backend logic (DB, ExifTool daemon, file ops) maps cleanly to Rust.
 
 * * *
 
