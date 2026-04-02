@@ -1,88 +1,96 @@
-use crate::db::Database;
-use serde::Serialize;
-use std::fs;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
 use std::time::UNIX_EPOCH;
+use tauri::{Emitter, State};
 use tokio::sync::Mutex;
-use tauri::State;
 
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FileRow {
-    pub id: i64,
-    pub path: String,
-    pub filename: String,
-    pub extension: Option<String>,
-    pub size_bytes: Option<i64>,
-    pub mtime: i64,
-    pub file_kind: String,
-    pub thumbnail_path: Option<String>,
-    pub metadata: std::collections::HashMap<String, Option<String>>,
-}
+use crate::db::{Database, FileRow, MetadataRow, ViewRow};
+use crate::exiftool::daemon::ResilientExifToolDaemon;
 
-#[allow(dead_code)] // db will be used when commands query the index
 pub struct AppState {
     pub db: Mutex<Database>,
+    pub exiftool: ResilientExifToolDaemon,
 }
 
-fn classify_file_kind(path: &Path, is_dir: bool) -> &'static str {
-    if is_dir {
-        return "folder";
-    }
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .as_deref()
-    {
-        Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "svg" | "heic" | "heif" | "avif" | "raw" | "cr2" | "cr3" | "nef" | "arw" | "dng" | "orf" | "rw2") => "image",
-        Some("mp3" | "flac" | "wav" | "aac" | "ogg" | "opus" | "m4a" | "wma" | "aiff" | "alac") => "audio",
-        Some("mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "ts") => "video",
-        Some("pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "txt" | "md" | "rtf" | "csv" | "json" | "xml" | "html" | "htm" | "tex" | "epub") => "document",
-        _ => "other",
-    }
-}
+// ─── navigate_to ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn navigate_to(
     path: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<Vec<FileRow>, String> {
+    use std::path::Path;
+
     let dir = Path::new(&path);
     if !dir.is_dir() {
-        return Err(format!("Not a directory: {}", path));
+        return Err(format!("Not a directory: {path}"));
     }
 
-    let entries = fs::read_dir(dir).map_err(|e| format!("Cannot read directory: {}", e))?;
+    {
+        let db = state.db.lock().await;
+        fast_index_folder(&db, &path).await?;
+    }
 
-    let mut rows: Vec<FileRow> = Vec::new();
-    let mut id_counter: i64 = 1;
+    // Spawn full ExifTool scan in the background.
+    let app_clone = app.clone();
+    let path_clone = path.clone();
+    let state_ptr = state.inner() as *const AppState as usize;
+    tokio::spawn(async move {
+        // SAFETY: AppState is managed by Tauri and lives for the app lifetime.
+        let state_ref = unsafe { &*(state_ptr as *const AppState) };
+        let db = state_ref.db.lock().await;
+        let _ = crate::db::indexer::index_folder(
+            &db,
+            &state_ref.exiftool,
+            &app_clone,
+            &path_clone,
+        )
+        .await;
+        // After indexing, emit an update event so the frontend can refresh.
+        let _ = app_clone.emit("index-update", serde_json::json!({ "folderPath": path_clone }));
+    });
+
+    let db = state.db.lock().await;
+    db.get_files_for_folder(&path)
+        .await
+        .map_err(|e| format!("DB error: {e}"))
+}
+
+/// Fast filesystem-only index (no ExifTool): upserts system metadata for all
+/// direct children of `folder_path`.
+async fn fast_index_folder(db: &Database, folder_path: &str) -> Result<(), String> {
+    use std::fs;
+    use std::path::Path;
+
+    let dir = Path::new(folder_path);
+    let entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| format!("Cannot read directory: {e}"))?
+        .filter_map(|e| e.ok())
+        .collect();
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
 
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let path_str = entry.path().to_string_lossy().to_string();
         let meta = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,
         };
-
-        let entry_path = entry.path();
         let filename = entry.file_name().to_string_lossy().to_string();
         let is_dir = meta.is_dir();
-
         let extension = if is_dir {
             None
         } else {
-            entry_path
+            entry
+                .path()
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_lowercase())
         };
-
         let size_bytes = if is_dir { None } else { Some(meta.len() as i64) };
-
         let mtime = meta
             .modified()
             .unwrap_or(UNIX_EPOCH)
@@ -90,36 +98,383 @@ pub async fn navigate_to(
             .unwrap_or_default()
             .as_millis() as i64;
 
-        let file_kind = classify_file_kind(&entry_path, is_dir);
+        #[cfg(target_family = "unix")]
+        let inode: Option<i64> = {
+            use std::os::unix::fs::MetadataExt;
+            Some(meta.ino() as i64)
+        };
+        #[cfg(not(target_family = "unix"))]
+        let inode: Option<i64> = None;
 
-        rows.push(FileRow {
-            id: id_counter,
-            path: entry_path.to_string_lossy().to_string(),
-            filename,
-            extension,
-            size_bytes,
-            mtime,
-            file_kind: file_kind.to_string(),
-            thumbnail_path: None,
-            metadata: std::collections::HashMap::new(),
-        });
+        let file_kind = crate::db::indexer::classify_file_kind_pub(&entry.path(), is_dir);
 
-        id_counter += 1;
+        let _ = db
+            .upsert_file(
+                &path_str,
+                &filename,
+                extension.as_deref(),
+                size_bytes,
+                mtime,
+                inode,
+                file_kind,
+                now_ms,
+            )
+            .await;
+    }
+    Ok(())
+}
+
+// ─── get_metadata ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_metadata(
+    file_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<MetadataRow>, String> {
+    let db = state.db.lock().await;
+    db.get_metadata_for_file(file_id)
+        .await
+        .map_err(|e| format!("DB error: {e}"))
+}
+
+// ─── write_metadata ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataWriteInput {
+    pub file_id: i64,
+    pub namespace: String,
+    pub key: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteResultOutput {
+    pub success: bool,
+    pub affected_files: usize,
+    pub failed_files: usize,
+    pub errors: Vec<WriteErrorOutput>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteErrorOutput {
+    pub file_id: i64,
+    pub path: String,
+    pub message: String,
+}
+
+#[tauri::command]
+pub async fn write_metadata(
+    writes: Vec<MetadataWriteInput>,
+    state: State<'_, AppState>,
+) -> Result<WriteResultOutput, String> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    let db = state.db.lock().await;
+    let mut errors = Vec::new();
+
+    for w in &writes {
+        let _ = db
+            .upsert_metadata(w.file_id, &w.namespace, &w.key, w.new_value.as_deref(), now_ms)
+            .await;
+
+        if let Err(e) = db
+            .enqueue_write(
+                w.file_id,
+                &w.namespace,
+                &w.key,
+                w.old_value.as_deref(),
+                w.new_value.as_deref(),
+                now_ms,
+            )
+            .await
+        {
+            errors.push(WriteErrorOutput {
+                file_id: w.file_id,
+                path: String::new(),
+                message: e.to_string(),
+            });
+        }
     }
 
-    // Sort: folders first, then alphabetically by filename
-    rows.sort_by(|a, b| {
-        let a_is_folder = a.file_kind == "folder";
-        let b_is_folder = b.file_kind == "folder";
-        b_is_folder
-            .cmp(&a_is_folder)
-            .then_with(|| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()))
-    });
+    Ok(WriteResultOutput {
+        success: errors.is_empty(),
+        affected_files: writes.len() - errors.len(),
+        failed_files: errors.len(),
+        errors,
+    })
+}
 
-    // Reassign IDs after sort
-    for (i, row) in rows.iter_mut().enumerate() {
-        row.id = (i + 1) as i64;
+// ─── bulk_write ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkWriteInput {
+    pub file_ids: Vec<i64>,
+    pub namespace: String,
+    pub key: String,
+    pub value: Option<String>,
+}
+
+#[tauri::command]
+pub async fn bulk_write(
+    write: BulkWriteInput,
+    state: State<'_, AppState>,
+) -> Result<WriteResultOutput, String> {
+    let individual: Vec<MetadataWriteInput> = write
+        .file_ids
+        .into_iter()
+        .map(|id| MetadataWriteInput {
+            file_id: id,
+            namespace: write.namespace.clone(),
+            key: write.key.clone(),
+            old_value: None,
+            new_value: write.value.clone(),
+        })
+        .collect();
+    write_metadata(individual, state).await
+}
+
+// ─── file_op ──────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum FileOperationInput {
+    Open { paths: Vec<String> },
+    Reveal { paths: Vec<String> },
+    Rename { path: String, next_name: String },
+    Move { paths: Vec<String>, destination: String },
+    Copy { paths: Vec<String>, destination: String },
+    Delete { paths: Vec<String> },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOpResultOutput {
+    pub success: bool,
+    pub message: Option<String>,
+    pub paths: Option<Vec<String>>,
+}
+
+#[tauri::command]
+pub async fn file_op(
+    operation: FileOperationInput,
+    state: State<'_, AppState>,
+) -> Result<FileOpResultOutput, String> {
+    match operation {
+        FileOperationInput::Open { paths } => open_files(&paths),
+        FileOperationInput::Reveal { paths } => reveal_files(&paths),
+        FileOperationInput::Rename { path, next_name } => {
+            let db = state.db.lock().await;
+            rename_file_op(&db, &path, &next_name).await
+        }
+        FileOperationInput::Delete { paths } => {
+            let db = state.db.lock().await;
+            delete_files_op(&db, &paths).await
+        }
+        FileOperationInput::Move { paths, destination } => {
+            let db = state.db.lock().await;
+            move_files_op(&db, &paths, &destination, false).await
+        }
+        FileOperationInput::Copy { paths, destination } => {
+            let db = state.db.lock().await;
+            move_files_op(&db, &paths, &destination, true).await
+        }
+    }
+}
+
+fn open_files(paths: &[String]) -> Result<FileOpResultOutput, String> {
+    for path in paths {
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+
+        #[cfg(target_os = "linux")]
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+
+        #[cfg(target_os = "windows")]
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(FileOpResultOutput { success: true, message: None, paths: None })
+}
+
+fn reveal_files(paths: &[String]) -> Result<FileOpResultOutput, String> {
+    for path in paths {
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open")
+            .args(["-R", path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+
+        #[cfg(target_os = "linux")]
+        {
+            if std::process::Command::new("nautilus")
+                .args(["--select", path])
+                .spawn()
+                .is_err()
+            {
+                let parent = std::path::Path::new(path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
+                std::process::Command::new("xdg-open")
+                    .arg(&parent)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        std::process::Command::new("explorer")
+            .args(["/select,", path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(FileOpResultOutput { success: true, message: None, paths: None })
+}
+
+async fn rename_file_op(db: &Database, path: &str, next_name: &str) -> Result<FileOpResultOutput, String> {
+    let old = std::path::Path::new(path);
+    let new = old.with_file_name(next_name);
+    std::fs::rename(old, &new).map_err(|e| e.to_string())?;
+    let new_str = new.to_string_lossy().to_string();
+    db.rename_file(path, &new_str, next_name)
+        .await
+        .map_err(|e| format!("DB rename error: {e}"))?;
+    Ok(FileOpResultOutput {
+        success: true,
+        message: None,
+        paths: Some(vec![new_str]),
+    })
+}
+
+async fn delete_files_op(db: &Database, paths: &[String]) -> Result<FileOpResultOutput, String> {
+    for path in paths {
+        let p = std::path::Path::new(path);
+        if p.is_dir() {
+            std::fs::remove_dir_all(p).map_err(|e| e.to_string())?;
+        } else {
+            std::fs::remove_file(p).map_err(|e| e.to_string())?;
+        }
+        db.delete_file_by_path(path)
+            .await
+            .map_err(|e| format!("DB delete error: {e}"))?;
+    }
+    Ok(FileOpResultOutput { success: true, message: None, paths: None })
+}
+
+async fn move_files_op(
+    db: &Database,
+    paths: &[String],
+    destination: &str,
+    copy: bool,
+) -> Result<FileOpResultOutput, String> {
+    let dest_dir = std::path::Path::new(destination);
+    let mut new_paths = Vec::new();
+
+    for path in paths {
+        let src = std::path::Path::new(path);
+        let filename = src
+            .file_name()
+            .ok_or_else(|| format!("Cannot get filename from {path}"))?;
+        let dest = dest_dir.join(filename);
+        let dest_str = dest.to_string_lossy().to_string();
+
+        if copy {
+            std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+        } else {
+            if std::fs::rename(src, &dest).is_err() {
+                std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+                std::fs::remove_file(src).map_err(|e| e.to_string())?;
+            }
+            db.delete_file_by_path(path)
+                .await
+                .map_err(|e| format!("DB error: {e}"))?;
+        }
+        new_paths.push(dest_str);
     }
 
-    Ok(rows)
+    Ok(FileOpResultOutput {
+        success: true,
+        message: None,
+        paths: Some(new_paths),
+    })
+}
+
+// ─── Column / view commands ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnInput {
+    pub label: String,
+    pub namespace: String,
+    pub key: String,
+    pub data_type: String,
+    pub write_dest: String,
+    pub width_px: Option<i64>,
+}
+
+#[tauri::command]
+pub async fn add_column(
+    column: ColumnInput,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let db = state.db.lock().await;
+    db.add_column(
+        &column.label,
+        &column.namespace,
+        &column.key,
+        &column.data_type,
+        &column.write_dest,
+        column.width_px.unwrap_or(160),
+        now_ms,
+    )
+    .await
+    .map_err(|e| format!("DB error: {e}"))
+}
+
+#[tauri::command]
+pub async fn get_views(state: State<'_, AppState>) -> Result<Vec<ViewRow>, String> {
+    let db = state.db.lock().await;
+    db.get_views().await.map_err(|e| format!("DB error: {e}"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveViewInput {
+    pub name: String,
+    pub columns_json: String,
+}
+
+#[tauri::command]
+pub async fn save_view(
+    view: SaveViewInput,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let db = state.db.lock().await;
+    db.save_view(&view.name, &view.columns_json, now_ms)
+        .await
+        .map_err(|e| format!("DB error: {e}"))
 }
