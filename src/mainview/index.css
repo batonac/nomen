@@ -64,6 +64,12 @@
     font-size: 12px;
 }
 
+.indexing-indicator {
+    color: var(--accent);
+    font-size: 11px;
+    opacity: 0.8;
+}
+
 /* Breadcrumb */
 .breadcrumb {
     display: flex;
@@ -72,6 +78,24 @@
     font-size: 13px;
     min-width: 0;
     overflow: hidden;
+    flex: 1;
+}
+
+.breadcrumb--edit {
+    flex: 1;
+}
+
+.breadcrumb-input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 2px 6px;
+    outline: none;
+    min-width: 0;
+    width: 100%;
 }
 
 .breadcrumb-item {
@@ -104,6 +128,7 @@
     color: var(--text);
     padding: 2px 4px;
     font-weight: 500;
+    cursor: default;
 }
 
 /* Error bar */
