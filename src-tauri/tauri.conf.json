@@ -5,8 +5,7 @@
   "identifier": "dev.nomen.app",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "",
+    "beforeDevCommand": "bun run build.ts",
     "beforeBuildCommand": "bun run build.ts"
   },
   "app": {

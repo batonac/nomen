@@ -2,11 +2,12 @@ use turso::{Builder, Connection, Database as TursoDb};
 use std::fs;
 use std::path::PathBuf;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Database {
     pub conn: Connection,
-    pub path: PathBuf,
+    #[allow(dead_code)]
+    path: PathBuf,
 }
 
 impl Database {
@@ -24,7 +25,16 @@ impl Database {
             .build()
             .await?;
         let conn = db.connect()?;
-        conn.execute("PRAGMA foreign_keys = ON", ()).await?;
+
+        // Turso 0.5: enable MVCC for concurrent reads/writes
+        // (background indexer writes while UI reads — no locking)
+        let mut rows = conn.query("PRAGMA journal_mode = 'mvcc'", ()).await?;
+        while rows.next().await?.is_some() {}
+
+        let mut rows = conn.query("PRAGMA foreign_keys = ON", ()).await?;
+        while rows.next().await?.is_some() {}
+
+
 
         let database = Database {
             conn,
@@ -45,7 +55,6 @@ impl Database {
         };
 
         if version < SCHEMA_VERSION {
-            // Execute each statement individually — Turso doesn't have execute_batch
             for stmt in INITIAL_SCHEMA.split(';') {
                 let trimmed = stmt.trim();
                 if !trimmed.is_empty() {
@@ -63,38 +72,39 @@ impl Database {
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    path          TEXT    NOT NULL UNIQUE,
-    filename      TEXT    NOT NULL,
-    extension     TEXT,
-    size_bytes    INTEGER,
-    mtime         INTEGER NOT NULL,
-    inode         INTEGER,
-    content_hash  TEXT,
-    file_kind     TEXT    NOT NULL,
-    indexed_at    INTEGER NOT NULL,
+    id             INTEGER PRIMARY KEY,
+    path           TEXT    NOT NULL UNIQUE,
+    filename       TEXT    NOT NULL,
+    extension      TEXT,
+    size_bytes     INTEGER,
+    mtime          INTEGER NOT NULL,
+    inode          INTEGER,
+    content_hash   TEXT,
+    file_kind      TEXT    NOT NULL,
+    indexed_at     INTEGER NOT NULL,
     thumbnail_path TEXT
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS files_path_idx ON files(path);
 CREATE INDEX IF NOT EXISTS files_mtime_idx ON files(mtime);
 
 CREATE TABLE IF NOT EXISTS metadata (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         INTEGER PRIMARY KEY,
     file_id    INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     namespace  TEXT    NOT NULL,
     key        TEXT    NOT NULL,
     value      TEXT,
     data_type  TEXT    NOT NULL DEFAULT 'text',
     updated_at INTEGER NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS metadata_file_id_idx ON metadata(file_id);
 CREATE INDEX IF NOT EXISTS metadata_namespace_key_idx ON metadata(namespace, key);
 CREATE UNIQUE INDEX IF NOT EXISTS metadata_file_ns_key_idx ON metadata(file_id, namespace, key);
+;
 
 CREATE TABLE IF NOT EXISTS columns (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          INTEGER PRIMARY KEY,
     label       TEXT    NOT NULL,
     namespace   TEXT    NOT NULL,
     key         TEXT    NOT NULL,
@@ -104,26 +114,26 @@ CREATE TABLE IF NOT EXISTS columns (
     is_sortable INTEGER NOT NULL DEFAULT 1,
     is_editable INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL
-);
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS columns_ns_key_idx ON columns(namespace, key);
 
 CREATE TABLE IF NOT EXISTS views (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT    NOT NULL UNIQUE,
-    columns_json TEXT   NOT NULL,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
-);
+    id           INTEGER PRIMARY KEY,
+    name         TEXT    NOT NULL UNIQUE,
+    columns_json TEXT    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS folder_views (
     path              TEXT    NOT NULL PRIMARY KEY,
     view_id           INTEGER NOT NULL REFERENCES views(id),
     apply_to_children INTEGER NOT NULL DEFAULT 0
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS write_queue (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           INTEGER PRIMARY KEY,
     file_id      INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     namespace    TEXT    NOT NULL,
     key          TEXT    NOT NULL,
@@ -133,7 +143,7 @@ CREATE TABLE IF NOT EXISTS write_queue (
     error_msg    TEXT,
     created_at   INTEGER NOT NULL,
     completed_at INTEGER
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS write_queue_status_idx ON write_queue(status);
 CREATE INDEX IF NOT EXISTS write_queue_file_id_idx ON write_queue(file_id);
@@ -142,7 +152,6 @@ CREATE INDEX IF NOT EXISTS write_queue_file_id_idx ON write_queue(file_id);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -172,6 +181,18 @@ mod tests {
         assert!(tables.contains(&"views".to_string()));
         assert!(tables.contains(&"write_queue".to_string()));
         assert!(tables.contains(&"folder_views".to_string()));
+    }
+
+    #[tokio::test]
+    async fn mvcc_journal_mode_enabled() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Database::open(&path).await.unwrap();
+
+        let mut rows = db.conn.query("PRAGMA journal_mode", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let mode = row.get_value(0).unwrap();
+        assert_eq!(mode.as_text().unwrap(), "mvcc");
     }
 
     #[tokio::test]
@@ -218,4 +239,5 @@ mod tests {
         let count = row.get_value(0).unwrap();
         assert_eq!(count.as_integer().unwrap(), &0);
     }
+
 }

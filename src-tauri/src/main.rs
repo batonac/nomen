@@ -1,19 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
 mod db;
 
+use commands::AppState;
 use db::Database;
 use tokio::sync::Mutex;
-use tauri::Manager;
-
-struct AppState {
-    db: Mutex<Database>,
-}
-
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! Nomen is running.", name)
-}
 
 fn main() {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -26,7 +18,7 @@ fn main() {
         .manage(AppState {
             db: Mutex::new(database),
         })
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![commands::navigate_to])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

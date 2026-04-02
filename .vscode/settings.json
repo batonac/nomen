@@ -1,0 +1,6 @@
+{
+  "json.schemaDownload.enable": true,
+  "workbench.trustedDomains": [
+    "https://raw.githubusercontent.com"
+  ]
+}
