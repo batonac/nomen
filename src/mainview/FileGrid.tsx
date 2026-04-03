@@ -12,10 +12,11 @@ import {
 } from "@glideapps/glide-data-grid";
 import { useCallback, useRef, useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { FileRow, MetadataFieldKey } from "../shared/types";
+import type { ColumnDefinition, FileRow, MetadataFieldKey } from "../shared/types";
 
 interface FileGridProps {
     rows: FileRow[];
+    columns: ColumnDefinition[];
     onNavigate: (path: string) => void;
     onRowsChange?: (rows: FileRow[]) => void;
 }
@@ -65,14 +66,24 @@ const SYSTEM_COLUMNS: GridColumn[] = [
     { title: "Modified", id: "mtime", width: 180 },
 ];
 
-export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
+export function FileGrid({ rows, columns, onNavigate, onRowsChange }: FileGridProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const [size, setSize] = useState({ width: 800, height: 600 });
     const [selection, setSelection] = useState<GridSelection>({
         columns: CompactSelection.empty(),
         rows: CompactSelection.empty(),
     });
-    const [extraColumns] = useState<GridColumn[]>([]);
+    const [extraColumns, setExtraColumns] = useState<GridColumn[]>([]);
+
+    useEffect(() => {
+        setExtraColumns(
+            columns.map((col) => ({
+                title: col.label,
+                id: `${col.namespace}:${col.key}`,
+                width: col.widthPx,
+            }))
+        );
+    }, [columns]);
     const [localRows, setLocalRows] = useState<FileRow[]>(rows);
 
     // Sync local rows when parent rows change.
@@ -91,7 +102,7 @@ export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
         return () => obs.disconnect();
     }, []);
 
-    const columns: GridColumn[] = [...SYSTEM_COLUMNS, ...extraColumns];
+    const gridColumns: GridColumn[] = [...SYSTEM_COLUMNS, ...extraColumns];
 
     const getContent = useCallback(
         (cell: Item): GridCell => {
@@ -292,7 +303,7 @@ export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
         <div ref={containerRef} style={{ width: "100%", height: "100%" }}>
             <DataEditor
                 getCellContent={getContent}
-                columns={columns}
+                columns={gridColumns}
                 rows={localRows.length}
                 onCellActivated={onCellActivated}
                 onCellEdited={onCellEdited}

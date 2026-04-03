@@ -44,7 +44,6 @@ pub struct MetadataRow {
 }
 
 /// A column definition row.
-#[allow(dead_code)]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnRow {
@@ -173,6 +172,29 @@ impl Reader {
                 columns_json: row.get_value(2)?.as_text().map(|s| s.as_str()).unwrap_or("[]").to_string(),
                 created_at: row.get_value(3)?.as_integer().copied().unwrap_or(0),
                 updated_at: row.get_value(4)?.as_integer().copied().unwrap_or(0),
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn get_columns(&self) -> turso::Result<Vec<ColumnRow>> {
+        let mut out = Vec::new();
+        let mut rows = self.0.query(
+            "SELECT id, label, namespace, key, data_type, write_dest, width_px, is_sortable, is_editable, created_at FROM columns ORDER BY id",
+            (),
+        ).await?;
+        while let Some(row) = rows.next().await? {
+            out.push(ColumnRow {
+                id: row.get_value(0)?.as_integer().copied().unwrap_or(0),
+                label: row.get_value(1)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
+                namespace: row.get_value(2)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
+                key: row.get_value(3)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
+                data_type: row.get_value(4)?.as_text().map(|s| s.as_str()).unwrap_or("text").to_string(),
+                write_dest: row.get_value(5)?.as_text().map(|s| s.as_str()).unwrap_or("embedded_xmp").to_string(),
+                width_px: row.get_value(6)?.as_integer().copied().unwrap_or(160),
+                is_sortable: row.get_value(7)?.as_integer().copied().unwrap_or(1) != 0,
+                is_editable: row.get_value(8)?.as_integer().copied().unwrap_or(1) != 0,
+                created_at: row.get_value(9)?.as_integer().copied().unwrap_or(0),
             });
         }
         Ok(out)
@@ -461,32 +483,6 @@ impl Database {
             .map(|_| ())
     }
 
-    #[allow(dead_code)]
-    pub async fn get_columns(&self) -> turso::Result<Vec<ColumnRow>> {
-        let mut out = Vec::new();
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT id, label, namespace, key, data_type, write_dest, width_px, is_sortable, is_editable, created_at FROM columns ORDER BY id",
-                (),
-            )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            out.push(ColumnRow {
-                id: row.get_value(0)?.as_integer().copied().unwrap_or(0),
-                label: row.get_value(1)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
-                namespace: row.get_value(2)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
-                key: row.get_value(3)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
-                data_type: row.get_value(4)?.as_text().map(|s| s.as_str()).unwrap_or("text").to_string(),
-                write_dest: row.get_value(5)?.as_text().map(|s| s.as_str()).unwrap_or("embedded_xmp").to_string(),
-                width_px: row.get_value(6)?.as_integer().copied().unwrap_or(160),
-                is_sortable: row.get_value(7)?.as_integer().copied().unwrap_or(1) != 0,
-                is_editable: row.get_value(8)?.as_integer().copied().unwrap_or(1) != 0,
-                created_at: row.get_value(9)?.as_integer().copied().unwrap_or(0),
-            });
-        }
-        Ok(out)
-    }
 
     pub async fn save_view(&self, name: &str, columns_json: &str, now_ms: i64) -> turso::Result<()> {
         let now_s = now_ms.to_string();

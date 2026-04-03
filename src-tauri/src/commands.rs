@@ -4,7 +4,7 @@ use std::time::UNIX_EPOCH;
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
 
-use crate::db::{Database, FileRow, MetadataRow, ReadPool, ViewRow};
+use crate::db::{ColumnRow, Database, FileRow, MetadataRow, ReadPool, ViewRow};
 use crate::exiftool::daemon::ResilientExifToolDaemon;
 
 pub struct AppState {
@@ -439,23 +439,45 @@ pub struct ColumnInput {
 pub async fn add_column(
     column: ColumnInput,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<ColumnRow, String> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    let db = state.db.lock().await;
-    db.add_column(
-        &column.label,
-        &column.namespace,
-        &column.key,
-        &column.data_type,
-        &column.write_dest,
-        column.width_px.unwrap_or(160),
-        now_ms,
-    )
-    .await
-    .map_err(|e| format!("DB error: {e}"))
+    {
+        let db = state.db.lock().await;
+        db.add_column(
+            &column.label,
+            &column.namespace,
+            &column.key,
+            &column.data_type,
+            &column.write_dest,
+            column.width_px.unwrap_or(160),
+            now_ms,
+        )
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+    }
+    // Read the freshly-inserted row back so the frontend gets the assigned id.
+    state.reads
+        .reader()
+        .map_err(|e| format!("DB error: {e}"))?
+        .get_columns()
+        .await
+        .map_err(|e| format!("DB error: {e}"))?
+        .into_iter()
+        .find(|c| c.namespace == column.namespace && c.key == column.key)
+        .ok_or_else(|| "Column not found after insert".to_string())
+}
+
+#[tauri::command]
+pub async fn get_columns(state: State<'_, AppState>) -> Result<Vec<ColumnRow>, String> {
+    state.reads
+        .reader()
+        .map_err(|e| format!("DB error: {e}"))?
+        .get_columns()
+        .await
+        .map_err(|e| format!("DB error: {e}"))
 }
 
 #[tauri::command]

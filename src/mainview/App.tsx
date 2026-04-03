@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState } from "react";
-import type { FileRow } from "../shared/types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ColumnDefinition, FileRow } from "../shared/types";
 import { Breadcrumb } from "./Breadcrumb";
 import { FileGrid } from "./FileGrid";
 
@@ -20,6 +20,13 @@ function App() {
         phase: string;
     } | null>(null);
 
+    // Column management
+    const [columns, setColumns] = useState<ColumnDefinition[]>([]);
+    const [showColForm, setShowColForm] = useState(false);
+    const [colLabel, setColLabel] = useState("");
+    const [colTag, setColTag] = useState("");
+    const colLabelRef = useRef<HTMLInputElement>(null);
+
     const navigateTo = useCallback(async (path: string) => {
         setLoading(true);
         setError(null);
@@ -34,10 +41,55 @@ function App() {
         }
     }, []);
 
+    const openColForm = useCallback(() => {
+        setShowColForm(true);
+        // focus the label input on next tick
+        setTimeout(() => colLabelRef.current?.focus(), 0);
+    }, []);
+
+    const handleAddColumn = useCallback(async () => {
+        const tag = colTag.trim();
+        const label = colLabel.trim();
+        if (!label || !tag) return;
+        const colon = tag.indexOf(":");
+        if (colon <= 0 || colon === tag.length - 1) {
+            setError('Tag must be in "Namespace:Key" format, e.g. XMP:Description');
+            return;
+        }
+        const namespace = tag.slice(0, colon);
+        const key = tag.slice(colon + 1);
+        try {
+            const col = await invoke<ColumnDefinition>("add_column", {
+                column: { label, namespace, key, dataType: "text", writeDest: "embedded_xmp", widthPx: 160 },
+            });
+            setColumns((prev) => {
+                // Replace if same namespace:key already exists, otherwise append.
+                const idx = prev.findIndex(
+                    (c) => c.namespace === col.namespace && c.key === col.key
+                );
+                return idx >= 0
+                    ? prev.map((c, i) => (i === idx ? col : c))
+                    : [...prev, col];
+            });
+            setShowColForm(false);
+            setColLabel("");
+            setColTag("");
+        } catch (e) {
+            setError(String(e));
+        }
+    }, [colLabel, colTag]);
+
     const navigateUp = useCallback(() => {
         const parent = currentPath.replace(/\/[^/]+\/?$/, "") || "/";
         navigateTo(parent);
     }, [currentPath, navigateTo]);
+
+    // Load saved columns on mount.
+    useEffect(() => {
+        invoke<ColumnDefinition[]>("get_columns")
+            .then(setColumns)
+            .catch(console.error);
+    }, []);
 
     // Initial navigation.
     useEffect(() => {
@@ -123,11 +175,45 @@ function App() {
                         ⚙ {indexingProgress.indexed}/{indexingProgress.total}
                     </span>
                 )}
+                <button
+                    type="button"
+                    className="nav-button col-add-btn"
+                    onClick={showColForm ? () => setShowColForm(false) : openColForm}
+                    title="Add metadata column"
+                >
+                    ＋
+                </button>
             </header>
-            {error && <div className="error-bar">{error}</div>}
+            {showColForm && (
+                <div className="col-form">
+                    <input
+                        ref={colLabelRef}
+                        className="col-input"
+                        placeholder="Label"
+                        value={colLabel}
+                        onChange={(e) => setColLabel(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleAddColumn()}
+                    />
+                    <input
+                        className="col-input"
+                        placeholder="Tag  (e.g. XMP:Description)"
+                        value={colTag}
+                        onChange={(e) => setColTag(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleAddColumn()}
+                    />
+                    <button type="button" className="col-btn col-btn--primary" onClick={handleAddColumn}>
+                        Add
+                    </button>
+                    <button type="button" className="col-btn" onClick={() => setShowColForm(false)}>
+                        Cancel
+                    </button>
+                </div>
+            )}
+            {error && <div className="error-bar" onClick={() => setError(null)}>{error}</div>}
             <main className="grid-container">
                 <FileGrid
                     rows={rows}
+                    columns={columns}
                     onNavigate={navigateTo}
                     onRowsChange={setRows}
                 />

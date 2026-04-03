@@ -51,6 +51,7 @@ fn main() {
             commands::bulk_write,
             commands::file_op,
             commands::add_column,
+            commands::get_columns,
             commands::get_views,
             commands::save_view,
         ])
