@@ -8,6 +8,7 @@ use super::daemon::ResilientExifToolDaemon;
 pub type MetadataMap = HashMap<String, Option<String>>;
 
 /// Parsed metadata for a single file.
+#[allow(dead_code)]
 pub struct ExifData {
     pub path: String,
     pub tags: MetadataMap,

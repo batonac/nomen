@@ -11,7 +11,6 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Minimal representation of an indexed file used for change detection.
 pub struct IndexedFile {
-    pub id: i64,
     pub mtime: i64,
     pub inode: Option<i64>,
 }
@@ -45,6 +44,7 @@ pub struct MetadataRow {
 }
 
 /// A column definition row.
+#[allow(dead_code)]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnRow {
@@ -71,6 +71,114 @@ pub struct ViewRow {
     pub updated_at: i64,
 }
 
+/// A pool of read connections backed by a shared `TursoDb` handle.
+///
+/// WAL mode lets any number of readers run concurrently alongside the single
+/// writer, so read operations never need to acquire the write mutex.
+pub struct ReadPool {
+    db: TursoDb,
+}
+
+impl ReadPool {
+    /// Obtain a fresh read-only connection from the pool.
+    pub fn reader(&self) -> turso::Result<Reader> {
+        Ok(Reader(self.db.connect()?))
+    }
+}
+
+/// A short-lived read handle wrapping a single `Connection`.
+pub struct Reader(Connection);
+
+impl Reader {
+    pub async fn get_files_for_folder(&self, folder_path: &str) -> turso::Result<Vec<FileRow>> {
+        let prefix = if folder_path.ends_with('/') {
+            folder_path.to_string()
+        } else {
+            format!("{folder_path}/")
+        };
+
+        let mut file_rows: Vec<FileRow> = Vec::new();
+        let mut rows = self.0.query(
+            "SELECT id, path, filename, extension, size_bytes, mtime, file_kind, thumbnail_path
+             FROM files
+             WHERE path LIKE ?1 || '%'
+               AND path NOT LIKE ?1 || '%/%'
+             ORDER BY
+               CASE file_kind WHEN 'folder' THEN 0 ELSE 1 END,
+               LOWER(filename)",
+            [prefix.as_str()],
+        ).await?;
+
+        while let Some(row) = rows.next().await? {
+            let id = row.get_value(0)?.as_integer().copied().unwrap_or(0);
+            let path = row.get_value(1)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string();
+            let filename = row.get_value(2)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string();
+            let extension = row.get_value(3)?.as_text().map(|s| s.clone());
+            let size_bytes = row.get_value(4)?.as_integer().copied();
+            let mtime = row.get_value(5)?.as_integer().copied().unwrap_or(0);
+            let file_kind = row.get_value(6)?.as_text().map(|s| s.as_str()).unwrap_or("other").to_string();
+            let thumbnail_path = row.get_value(7)?.as_text().map(|s| s.clone());
+            file_rows.push(FileRow { id, path, filename, extension, size_bytes, mtime, file_kind, thumbnail_path, metadata: HashMap::new() });
+        }
+
+        for fr in &mut file_rows {
+            let id_s = fr.id.to_string();
+            let mut meta_rows = self.0.query(
+                "SELECT namespace, key, value FROM metadata WHERE file_id = ?1",
+                [id_s.as_str()],
+            ).await?;
+            while let Some(row) = meta_rows.next().await? {
+                let ns = row.get_value(0)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string();
+                let key = row.get_value(1)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string();
+                let val = row.get_value(2)?.as_text().map(|s| s.clone());
+                fr.metadata.insert(format!("{ns}:{key}"), val);
+            }
+        }
+
+        Ok(file_rows)
+    }
+
+    pub async fn get_metadata_for_file(&self, file_id: i64) -> turso::Result<Vec<MetadataRow>> {
+        let id_s = file_id.to_string();
+        let mut out = Vec::new();
+        let mut rows = self.0.query(
+            "SELECT id, file_id, namespace, key, value, data_type, updated_at
+             FROM metadata WHERE file_id = ?1",
+            [id_s.as_str()],
+        ).await?;
+        while let Some(row) = rows.next().await? {
+            out.push(MetadataRow {
+                id: row.get_value(0)?.as_integer().copied().unwrap_or(0),
+                file_id: row.get_value(1)?.as_integer().copied().unwrap_or(0),
+                namespace: row.get_value(2)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
+                key: row.get_value(3)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
+                value: row.get_value(4)?.as_text().map(|s| s.clone()),
+                data_type: row.get_value(5)?.as_text().map(|s| s.as_str()).unwrap_or("text").to_string(),
+                updated_at: row.get_value(6)?.as_integer().copied().unwrap_or(0),
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn get_views(&self) -> turso::Result<Vec<ViewRow>> {
+        let mut out = Vec::new();
+        let mut rows = self.0.query(
+            "SELECT id, name, columns_json, created_at, updated_at FROM views ORDER BY name",
+            (),
+        ).await?;
+        while let Some(row) = rows.next().await? {
+            out.push(ViewRow {
+                id: row.get_value(0)?.as_integer().copied().unwrap_or(0),
+                name: row.get_value(1)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
+                columns_json: row.get_value(2)?.as_text().map(|s| s.as_str()).unwrap_or("[]").to_string(),
+                created_at: row.get_value(3)?.as_integer().copied().unwrap_or(0),
+                updated_at: row.get_value(4)?.as_integer().copied().unwrap_or(0),
+            });
+        }
+        Ok(out)
+    }
+}
+
 pub struct Database {
     pub conn: Connection,
     #[allow(dead_code)]
@@ -78,7 +186,7 @@ pub struct Database {
 }
 
 impl Database {
-    pub async fn open_default() -> turso::Result<Self> {
+    pub async fn open_default() -> turso::Result<(Self, ReadPool)> {
         let base = dirs::home_dir()
             .expect("Cannot determine home directory")
             .join(".nomen");
@@ -87,28 +195,29 @@ impl Database {
         Self::open(&path).await
     }
 
-    pub async fn open(path: &PathBuf) -> turso::Result<Self> {
+    pub async fn open(path: &PathBuf) -> turso::Result<(Self, ReadPool)> {
         let db: TursoDb = Builder::new_local(path.to_str().expect("Invalid path"))
             .build()
             .await?;
         let conn = db.connect()?;
 
-        // Turso 0.5: enable MVCC for concurrent reads/writes
-        // (background indexer writes while UI reads — no locking)
-        let mut rows = conn.query("PRAGMA journal_mode = 'mvcc'", ()).await?;
+        // WAL mode: set once at the database level — all subsequent connections
+        // (including those from ReadPool) automatically use WAL, giving concurrent
+        // reads alongside the single write connection with no reader/writer blocking.
+        let mut rows = conn.query("PRAGMA journal_mode = WAL", ()).await?;
         while rows.next().await?.is_some() {}
 
         let mut rows = conn.query("PRAGMA foreign_keys = ON", ()).await?;
         while rows.next().await?.is_some() {}
 
-
-
-        let database = Database {
-            conn,
-            path: path.clone(),
-        };
+        let database = Database { conn, path: path.clone() };
         database.migrate().await?;
-        Ok(database)
+
+        // ReadPool keeps its own clone of the TursoDb handle so it can open
+        // independent connections without going through the write mutex.
+        let read_pool = ReadPool { db };
+
+        Ok((database, read_pool))
     }
 
     async fn migrate(&self) -> turso::Result<()> {
@@ -150,10 +259,9 @@ impl Database {
         match rows.next().await? {
             None => Ok(None),
             Some(row) => {
-                let id = row.get_value(0)?.as_integer().copied().unwrap_or(0);
                 let mtime = row.get_value(1)?.as_integer().copied().unwrap_or(0);
                 let inode = row.get_value(2)?.as_integer().copied();
-                Ok(Some(IndexedFile { id, mtime, inode }))
+                Ok(Some(IndexedFile { mtime, inode }))
             }
         }
     }
@@ -224,101 +332,6 @@ impl Database {
             )
             .await
             .map(|_| ())
-    }
-
-    /// Return all files that are direct children of `folder_path`, with their
-    /// metadata maps populated.
-    pub async fn get_files_for_folder(&self, folder_path: &str) -> turso::Result<Vec<FileRow>> {
-        let prefix = if folder_path.ends_with('/') {
-            folder_path.to_string()
-        } else {
-            format!("{folder_path}/")
-        };
-
-        let mut file_rows: Vec<FileRow> = Vec::new();
-
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT id, path, filename, extension, size_bytes, mtime, file_kind, thumbnail_path
-                 FROM files
-                 WHERE path LIKE ?1 || '%'
-                   AND path NOT LIKE ?1 || '%/%'
-                 ORDER BY
-                   CASE file_kind WHEN 'folder' THEN 0 ELSE 1 END,
-                   LOWER(filename)",
-                [prefix.as_str()],
-            )
-            .await?;
-
-        while let Some(row) = rows.next().await? {
-            let id = row.get_value(0)?.as_integer().copied().unwrap_or(0);
-            let path = row.get_value(1)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string();
-            let filename = row.get_value(2)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string();
-            let extension = row.get_value(3)?.as_text().map(|s| s.clone());
-            let size_bytes = row.get_value(4)?.as_integer().copied();
-            let mtime = row.get_value(5)?.as_integer().copied().unwrap_or(0);
-            let file_kind = row.get_value(6)?.as_text().map(|s| s.as_str()).unwrap_or("other").to_string();
-            let thumbnail_path = row.get_value(7)?.as_text().map(|s| s.clone());
-
-            file_rows.push(FileRow {
-                id,
-                path,
-                filename,
-                extension,
-                size_bytes,
-                mtime,
-                file_kind,
-                thumbnail_path,
-                metadata: HashMap::new(),
-            });
-        }
-
-        // Populate metadata for each file in a second pass.
-        for fr in &mut file_rows {
-            let id_s = fr.id.to_string();
-            let mut meta_rows = self
-                .conn
-                .query(
-                    "SELECT namespace, key, value FROM metadata WHERE file_id = ?1",
-                    [id_s.as_str()],
-                )
-                .await?;
-            while let Some(row) = meta_rows.next().await? {
-                let ns = row.get_value(0)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string();
-                let key = row.get_value(1)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string();
-                let val = row.get_value(2)?.as_text().map(|s| s.clone());
-                fr.metadata.insert(format!("{ns}:{key}"), val);
-            }
-        }
-
-        Ok(file_rows)
-    }
-
-    /// Return all metadata rows for `file_id`.
-    pub async fn get_metadata_for_file(&self, file_id: i64) -> turso::Result<Vec<MetadataRow>> {
-        let id_s = file_id.to_string();
-        let mut out = Vec::new();
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT id, file_id, namespace, key, value, data_type, updated_at
-                 FROM metadata WHERE file_id = ?1",
-                [id_s.as_str()],
-            )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            out.push(MetadataRow {
-                id: row.get_value(0)?.as_integer().copied().unwrap_or(0),
-                file_id: row.get_value(1)?.as_integer().copied().unwrap_or(0),
-                namespace: row.get_value(2)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
-                key: row.get_value(3)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
-                value: row.get_value(4)?.as_text().map(|s| s.clone()),
-                data_type: row.get_value(5)?.as_text().map(|s| s.as_str()).unwrap_or("text").to_string(),
-                updated_at: row.get_value(6)?.as_integer().copied().unwrap_or(0),
-            });
-        }
-        Ok(out)
     }
 
     /// Remove a file (and its cascaded metadata) from the index.
@@ -448,6 +461,7 @@ impl Database {
             .map(|_| ())
     }
 
+    #[allow(dead_code)]
     pub async fn get_columns(&self) -> turso::Result<Vec<ColumnRow>> {
         let mut out = Vec::new();
         let mut rows = self
@@ -469,24 +483,6 @@ impl Database {
                 is_sortable: row.get_value(7)?.as_integer().copied().unwrap_or(1) != 0,
                 is_editable: row.get_value(8)?.as_integer().copied().unwrap_or(1) != 0,
                 created_at: row.get_value(9)?.as_integer().copied().unwrap_or(0),
-            });
-        }
-        Ok(out)
-    }
-
-    pub async fn get_views(&self) -> turso::Result<Vec<ViewRow>> {
-        let mut out = Vec::new();
-        let mut rows = self
-            .conn
-            .query("SELECT id, name, columns_json, created_at, updated_at FROM views ORDER BY name", ())
-            .await?;
-        while let Some(row) = rows.next().await? {
-            out.push(ViewRow {
-                id: row.get_value(0)?.as_integer().copied().unwrap_or(0),
-                name: row.get_value(1)?.as_text().map(|s| s.as_str()).unwrap_or("").to_string(),
-                columns_json: row.get_value(2)?.as_text().map(|s| s.as_str()).unwrap_or("[]").to_string(),
-                created_at: row.get_value(3)?.as_integer().copied().unwrap_or(0),
-                updated_at: row.get_value(4)?.as_integer().copied().unwrap_or(0),
             });
         }
         Ok(out)

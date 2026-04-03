@@ -29,6 +29,7 @@ pub struct ExifToolDaemon {
     _child: Arc<Mutex<Child>>,
 }
 
+#[allow(dead_code)]
 impl ExifToolDaemon {
     /// Spawn ExifTool in `-stay_open` mode.  Returns an error if the binary
     /// cannot be found on `PATH`.

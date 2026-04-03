@@ -18,6 +18,7 @@ pub struct WatchHandle {
     _watcher: RecommendedWatcher,
 }
 
+#[allow(dead_code)]
 pub async fn watch_folder(
     folder_path: PathBuf,
     db: Arc<tokio::sync::Mutex<Database>>,
@@ -51,6 +52,7 @@ pub async fn watch_folder(
     Ok(WatchHandle { _watcher: watcher })
 }
 
+#[allow(dead_code)]
 async fn handle_event(
     event: Event,
     db: &Arc<tokio::sync::Mutex<Database>>,
@@ -95,6 +97,7 @@ async fn handle_event(
     }
 }
 
+#[allow(dead_code)]
 async fn re_index_file(
     db: &Database,
     daemon: &ResilientExifToolDaemon,

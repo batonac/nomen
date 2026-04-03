@@ -4,11 +4,12 @@ use std::time::UNIX_EPOCH;
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
 
-use crate::db::{Database, FileRow, MetadataRow, ViewRow};
+use crate::db::{Database, FileRow, MetadataRow, ReadPool, ViewRow};
 use crate::exiftool::daemon::ResilientExifToolDaemon;
 
 pub struct AppState {
     pub db: Arc<Mutex<Database>>,
+    pub reads: Arc<ReadPool>,
     pub exiftool: Arc<ResilientExifToolDaemon>,
 }
 
@@ -37,7 +38,7 @@ pub async fn navigate_to(
     let exiftool_clone = Arc::clone(&state.exiftool);
     let app_clone = app.clone();
     let path_clone = path.clone();
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let db = db_clone.lock().await;
         let _ = crate::db::indexer::index_folder(
             &db,
@@ -49,8 +50,10 @@ pub async fn navigate_to(
         let _ = app_clone.emit("index-update", serde_json::json!({ "folderPath": path_clone }));
     });
 
-    let db = state.db.lock().await;
-    db.get_files_for_folder(&path)
+    state.reads
+        .reader()
+        .map_err(|e| format!("DB error: {e}"))?
+        .get_files_for_folder(&path)
         .await
         .map_err(|e| format!("DB error: {e}"))
 }
@@ -107,7 +110,7 @@ async fn fast_index_folder(db: &Database, folder_path: &str) -> Result<(), Strin
 
         let file_kind = crate::db::indexer::classify_file_kind_pub(&entry.path(), is_dir);
 
-        let _ = db
+        if let Err(e) = db
             .upsert_file(
                 &path_str,
                 &filename,
@@ -118,7 +121,10 @@ async fn fast_index_folder(db: &Database, folder_path: &str) -> Result<(), Strin
                 file_kind,
                 now_ms,
             )
-            .await;
+            .await
+        {
+            eprintln!("[fast_index] upsert error: {e}");
+        }
     }
     Ok(())
 }
@@ -130,8 +136,10 @@ pub async fn get_metadata(
     file_id: i64,
     state: State<'_, AppState>,
 ) -> Result<Vec<MetadataRow>, String> {
-    let db = state.db.lock().await;
-    db.get_metadata_for_file(file_id)
+    state.reads
+        .reader()
+        .map_err(|e| format!("DB error: {e}"))?
+        .get_metadata_for_file(file_id)
         .await
         .map_err(|e| format!("DB error: {e}"))
 }
@@ -452,8 +460,12 @@ pub async fn add_column(
 
 #[tauri::command]
 pub async fn get_views(state: State<'_, AppState>) -> Result<Vec<ViewRow>, String> {
-    let db = state.db.lock().await;
-    db.get_views().await.map_err(|e| format!("DB error: {e}"))
+    state.reads
+        .reader()
+        .map_err(|e| format!("DB error: {e}"))?
+        .get_views()
+        .await
+        .map_err(|e| format!("DB error: {e}"))
 }
 
 #[derive(Deserialize)]
