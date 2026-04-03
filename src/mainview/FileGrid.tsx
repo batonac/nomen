@@ -7,12 +7,12 @@ import {
     type Item,
     type GridSelection,
     type EditableGridCell,
-    type Rectangle,
+    type FillPatternEventArgs,
     CompactSelection,
 } from "@glideapps/glide-data-grid";
 import { useCallback, useRef, useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { FileRow, ColumnDefinition } from "../shared/types";
+import type { FileRow, MetadataFieldKey } from "../shared/types";
 
 interface FileGridProps {
     rows: FileRow[];
@@ -72,7 +72,7 @@ export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
         columns: CompactSelection.empty(),
         rows: CompactSelection.empty(),
     });
-    const [extraColumns, setExtraColumns] = useState<GridColumn[]>([]);
+    const [extraColumns] = useState<GridColumn[]>([]);
     const [localRows, setLocalRows] = useState<FileRow[]>(rows);
 
     // Sync local rows when parent rows change.
@@ -150,7 +150,7 @@ export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
                             allowOverlay: true,
                         };
                     }
-                    const metaKey = `${colDef.id}`;
+                    const metaKey = colDef.id as MetadataFieldKey;
                     const value = fileRow.metadata[metaKey] ?? "";
                     return {
                         kind: GridCellKind.Text,
@@ -180,7 +180,7 @@ export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
 
             const newVal =
                 newValue.kind === GridCellKind.Text ? newValue.data : null;
-            const oldVal = fileRow.metadata[colDef.id as string] ?? null;
+            const oldVal = fileRow.metadata[colDef.id as MetadataFieldKey] ?? null;
 
             // Optimistic local update.
             const previousRows = localRows;
@@ -222,9 +222,10 @@ export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
 
     // Fill-handle: apply topmost value to all selected rows in same column.
     const onFillPattern = useCallback(
-        async (fillRange: Rectangle, patternRange: Rectangle) => {
-            if (fillRange.x !== patternRange.x) return;
-            const col = fillRange.x;
+        (event: FillPatternEventArgs) => {
+            const { patternSource, fillDestination } = event;
+            if (fillDestination.x !== patternSource.x) return;
+            const col = fillDestination.x;
             if (col < SYSTEM_COLUMNS.length) return;
 
             const colDef = extraColumns[col - SYSTEM_COLUMNS.length];
@@ -234,13 +235,13 @@ export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
             if (!namespace || !key) return;
 
             // Source value: top cell of pattern range.
-            const sourceRow = localRows[patternRange.y];
+            const sourceRow = localRows[patternSource.y];
             if (!sourceRow) return;
-            const value = sourceRow.metadata[colDef.id as string] ?? null;
+            const value = sourceRow.metadata[colDef.id as MetadataFieldKey] ?? null;
 
             // Collect target file IDs.
             const fileIds: number[] = [];
-            for (let r = fillRange.y; r < fillRange.y + fillRange.height; r++) {
+            for (let r = fillDestination.y; r < fillDestination.y + fillDestination.height; r++) {
                 const fr = localRows[r];
                 if (fr) fileIds.push(fr.id);
             }
@@ -250,7 +251,7 @@ export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
             // Optimistic local update.
             const previousRows = localRows;
             const updated = localRows.map((r, i) => {
-                if (i >= fillRange.y && i < fillRange.y + fillRange.height) {
+                if (i >= fillDestination.y && i < fillDestination.y + fillDestination.height) {
                     return {
                         ...r,
                         metadata: { ...r.metadata, [colDef.id as string]: value },
@@ -261,15 +262,13 @@ export function FileGrid({ rows, onNavigate, onRowsChange }: FileGridProps) {
             setLocalRows(updated);
             onRowsChange?.(updated);
 
-            try {
-                await invoke("bulk_write", {
-                    write: { fileIds, namespace, key, value },
-                });
-            } catch (e) {
+            invoke("bulk_write", {
+                write: { fileIds, namespace, key, value },
+            }).catch((e) => {
                 setLocalRows(previousRows);
                 onRowsChange?.(previousRows);
                 console.error("bulk_write failed:", e);
-            }
+            });
         },
         [localRows, extraColumns, onRowsChange]
     );
