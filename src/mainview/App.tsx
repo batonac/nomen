@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ColumnDefinition, FileRow } from "../shared/types";
+import { COLUMN_PRESETS, type ColumnPreset } from "../shared/presets";
 import { Breadcrumb } from "./Breadcrumb";
 import { FileGrid } from "./FileGrid";
 
@@ -78,6 +79,25 @@ function App() {
             setError(String(e));
         }
     }, [colLabel, colTag]);
+
+    const handleApplyPreset = useCallback(async (preset: ColumnPreset) => {
+        try {
+            const all = await invoke<ColumnDefinition[]>("add_columns", {
+                columns: preset.columns.map((c) => ({
+                    label: c.label,
+                    namespace: c.namespace,
+                    key: c.key,
+                    dataType: "text",
+                    writeDest: "embedded_xmp",
+                    widthPx: c.widthPx ?? 160,
+                })),
+            });
+            setColumns(all);
+            setShowColForm(false);
+        } catch (e) {
+            setError(String(e));
+        }
+    }, []);
 
     const navigateUp = useCallback(() => {
         const parent = currentPath.replace(/\/[^/]+\/?$/, "") || "/";
@@ -186,6 +206,18 @@ function App() {
             </header>
             {showColForm && (
                 <div className="col-form">
+                    {COLUMN_PRESETS.map((preset) => (
+                        <button
+                            key={preset.name}
+                            type="button"
+                            className="col-btn col-btn--preset"
+                            onClick={() => handleApplyPreset(preset)}
+                            title={`Add ${preset.name} columns`}
+                        >
+                            {preset.icon} {preset.name}
+                        </button>
+                    ))}
+                    <span className="col-form-sep" />
                     <input
                         ref={colLabelRef}
                         className="col-input"

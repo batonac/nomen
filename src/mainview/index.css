@@ -206,3 +206,15 @@
     background: var(--accent-hover);
     border-color: var(--accent-hover);
 }
+
+.col-btn--preset {
+    font-size: 12px;
+}
+
+.col-form-sep {
+    width: 1px;
+    height: 20px;
+    background: var(--border);
+    flex-shrink: 0;
+    margin: 0 2px;
+}

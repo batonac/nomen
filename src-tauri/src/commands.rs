@@ -471,6 +471,40 @@ pub async fn add_column(
 }
 
 #[tauri::command]
+pub async fn add_columns(
+    columns: Vec<ColumnInput>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ColumnRow>, String> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    {
+        let db = state.db.lock().await;
+        for col in &columns {
+            db.add_column(
+                &col.label,
+                &col.namespace,
+                &col.key,
+                &col.data_type,
+                &col.write_dest,
+                col.width_px.unwrap_or(160),
+                now_ms,
+            )
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+        }
+    }
+    // Return the full updated column list so the frontend can replace its state.
+    state.reads
+        .reader()
+        .map_err(|e| format!("DB error: {e}"))?
+        .get_columns()
+        .await
+        .map_err(|e| format!("DB error: {e}"))
+}
+
+#[tauri::command]
 pub async fn get_columns(state: State<'_, AppState>) -> Result<Vec<ColumnRow>, String> {
     state.reads
         .reader()

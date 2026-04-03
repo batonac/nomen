@@ -59,11 +59,14 @@ function fileKindIcon(kind: string): string {
 }
 
 // Fixed system columns (always present, left side).
+// Col 0 is a narrow icon column — double-clicking it opens/navigates.
+// Col 1 (Name) is editable for rename.
 const SYSTEM_COLUMNS: GridColumn[] = [
-    { title: "Name", id: "name", width: 300, icon: GridColumnIcon.HeaderString },
-    { title: "Kind", id: "kind", width: 80 },
-    { title: "Size", id: "size", width: 90 },
-    { title: "Modified", id: "mtime", width: 180 },
+    { title: "",        id: "icon",  width: 36,  icon: GridColumnIcon.HeaderArray },
+    { title: "Name",    id: "name",  width: 280, icon: GridColumnIcon.HeaderString },
+    { title: "Kind",    id: "kind",  width: 80 },
+    { title: "Size",    id: "size",  width: 90 },
+    { title: "Modified",id: "mtime", width: 180 },
 ];
 
 export function FileGrid({ rows, columns, onNavigate, onRowsChange }: FileGridProps) {
@@ -119,21 +122,29 @@ export function FileGrid({ rows, columns, onNavigate, onRowsChange }: FileGridPr
 
             // System columns.
             switch (col) {
-                case 0:
+                case 0: // Icon — double-click triggers open/navigate
+                    return {
+                        kind: GridCellKind.Text,
+                        data: fileRow.fileKind,
+                        displayData: fileKindIcon(fileRow.fileKind),
+                        allowOverlay: false,
+                        contentAlign: "center",
+                    };
+                case 1: // Name — editable for rename
                     return {
                         kind: GridCellKind.Text,
                         data: fileRow.filename,
-                        displayData: `${fileKindIcon(fileRow.fileKind)} ${fileRow.filename}`,
-                        allowOverlay: false,
+                        displayData: fileRow.filename,
+                        allowOverlay: true,
                     };
-                case 1:
+                case 2:
                     return {
                         kind: GridCellKind.Text,
                         data: fileRow.fileKind,
                         displayData: fileRow.fileKind,
                         allowOverlay: false,
                     };
-                case 2:
+                case 3:
                     return {
                         kind: GridCellKind.Text,
                         data: fileRow.sizeBytes?.toString() ?? "",
@@ -143,7 +154,7 @@ export function FileGrid({ rows, columns, onNavigate, onRowsChange }: FileGridPr
                                 : formatBytes(fileRow.sizeBytes),
                         allowOverlay: false,
                     };
-                case 3:
+                case 4:
                     return {
                         kind: GridCellKind.Text,
                         data: fileRow.mtime.toString(),
@@ -178,32 +189,50 @@ export function FileGrid({ rows, columns, onNavigate, onRowsChange }: FileGridPr
     const onCellEdited = useCallback(
         async (cell: Item, newValue: EditableGridCell) => {
             const [col, row] = cell;
-            if (col < SYSTEM_COLUMNS.length) return; // system columns are read-only
-
             const fileRow = localRows[row];
             if (!fileRow) return;
 
+            const newVal =
+                newValue.kind === GridCellKind.Text ? newValue.data.trim() : null;
+
+            if (col === 1) {
+                // Name column — rename the file.
+                if (!newVal || newVal === fileRow.filename) return;
+                const previousRows = localRows;
+                const updated = localRows.map((r, i) =>
+                    i === row ? { ...r, filename: newVal } : r
+                );
+                setLocalRows(updated);
+                onRowsChange?.(updated);
+                try {
+                    await invoke("file_op", {
+                        operation: { type: "rename", path: fileRow.path, nextName: newVal },
+                    });
+                } catch (e) {
+                    setLocalRows(previousRows);
+                    onRowsChange?.(previousRows);
+                    console.error("rename failed:", e);
+                }
+                return;
+            }
+
+            // Read-only system columns (icon, kind, size, mtime).
+            if (col < SYSTEM_COLUMNS.length) return;
+
+            // Metadata columns.
             const colDef = extraColumns[col - SYSTEM_COLUMNS.length];
             if (!colDef?.id) return;
 
             const [namespace, key] = (colDef.id as string).split(":");
             if (!namespace || !key) return;
 
-            const newVal =
-                newValue.kind === GridCellKind.Text ? newValue.data : null;
             const oldVal = fileRow.metadata[colDef.id as MetadataFieldKey] ?? null;
 
             // Optimistic local update.
             const previousRows = localRows;
             const updated = localRows.map((r, i) =>
                 i === row
-                    ? {
-                          ...r,
-                          metadata: {
-                              ...r.metadata,
-                              [colDef.id as string]: newVal,
-                          },
-                      }
+                    ? { ...r, metadata: { ...r.metadata, [colDef.id as string]: newVal } }
                     : r
             );
             setLocalRows(updated);
@@ -211,18 +240,9 @@ export function FileGrid({ rows, columns, onNavigate, onRowsChange }: FileGridPr
 
             try {
                 await invoke("write_metadata", {
-                    writes: [
-                        {
-                            fileId: fileRow.id,
-                            namespace,
-                            key,
-                            oldValue: oldVal,
-                            newValue: newVal,
-                        },
-                    ],
+                    writes: [{ fileId: fileRow.id, namespace, key, oldValue: oldVal, newValue: newVal }],
                 });
             } catch (e) {
-                // Revert on error.
                 setLocalRows(previousRows);
                 onRowsChange?.(previousRows);
                 console.error("write_metadata failed:", e);
@@ -284,20 +304,35 @@ export function FileGrid({ rows, columns, onNavigate, onRowsChange }: FileGridPr
         [localRows, extraColumns, onRowsChange]
     );
 
-    const onCellActivated = useCallback(
+    // Track double-clicks on the icon column manually so we don't need
+    // onCellActivated — GDG v6 suppresses its built-in edit-on-double-click
+    // behavior for ALL cells whenever onCellActivated is provided.
+    const lastIconClick: MutableRefObject<{ row: number; time: number } | null> =
+        useRef(null);
+
+    const onCellClicked = useCallback(
         (cell: Item) => {
-            const [_col, row] = cell;
-            const fileRow = localRows[row];
-            if (fileRow?.fileKind === "folder") {
-                onNavigate(fileRow.path);
-            } else if (fileRow) {
-                invoke("file_op", {
-                    operation: { type: "open", paths: [fileRow.path] },
-                }).catch(console.error);
+            const [col, row] = cell;
+            if (col !== 0) return;
+            const now = Date.now();
+            const last = lastIconClick.current;
+            if (last && last.row === row && now - last.time < 400) {
+                lastIconClick.current = null;
+                const fileRow = localRows[row];
+                if (fileRow?.fileKind === "folder") {
+                    onNavigate(fileRow.path);
+                } else if (fileRow) {
+                    invoke("file_op", {
+                        operation: { type: "open", paths: [fileRow.path] },
+                    }).catch(console.error);
+                }
+            } else {
+                lastIconClick.current = { row, time: now };
             }
         },
         [localRows, onNavigate]
     );
+
 
     return (
         <div ref={containerRef} style={{ width: "100%", height: "100%" }}>
@@ -305,14 +340,14 @@ export function FileGrid({ rows, columns, onNavigate, onRowsChange }: FileGridPr
                 getCellContent={getContent}
                 columns={gridColumns}
                 rows={localRows.length}
-                onCellActivated={onCellActivated}
+                onCellClicked={onCellClicked}
                 onCellEdited={onCellEdited}
                 onFillPattern={onFillPattern}
                 gridSelection={selection}
                 onGridSelectionChange={setSelection}
                 smoothScrollX
                 smoothScrollY
-                rowMarkers="clickable-number"
+                rowMarkers="none"
                 getCellsForSelection={true}
                 fillHandle={true}
                 keybindings={{ selectAll: true }}

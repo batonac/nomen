@@ -102,6 +102,7 @@ impl Reader {
              FROM files
              WHERE path LIKE ?1 || '%'
                AND path NOT LIKE ?1 || '%/%'
+               AND filename NOT LIKE '.%'
              ORDER BY
                CASE file_kind WHEN 'folder' THEN 0 ELSE 1 END,
                LOWER(filename)",
